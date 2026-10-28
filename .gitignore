@@ -3,3 +3,4 @@
 *.bc
 *.a
 __pycache__/
+dist/

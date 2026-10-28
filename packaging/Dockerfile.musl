@@ -1,0 +1,15 @@
+# Release build for musl systems (Alpine).
+#   docker build -f packaging/Dockerfile.musl --build-arg PG_MAJOR=17 --target artifact -o dist .
+ARG PG_MAJOR=17
+FROM postgres:${PG_MAJOR}-alpine AS build
+ARG PG_MAJOR
+RUN apk add --no-cache build-base binutils
+WORKDIR /src
+COPY Makefile opentelemetry_postgres.control install.sh LICENSE README.md ./
+COPY sql sql
+COPY src src
+COPY packaging/make-tarball.sh packaging/
+RUN make with_llvm=no && packaging/make-tarball.sh ${PG_MAJOR} /dist
+
+FROM scratch AS artifact
+COPY --from=build /dist/ /

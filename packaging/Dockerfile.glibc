@@ -1,0 +1,21 @@
+# Release build for glibc systems: compiled on an older distro (Debian 12, glibc 2.36)
+# against the community (PGDG) server headers, so the .so runs on anything newer.
+#   docker build -f packaging/Dockerfile.glibc --build-arg PG_MAJOR=17 --target artifact -o dist .
+ARG BASE=debian:bookworm
+FROM ${BASE} AS build
+ARG PG_MAJOR
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg postgresql-common build-essential \
+ && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+ && apt-get install -y --no-install-recommends postgresql-server-dev-${PG_MAJOR} \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Makefile opentelemetry_postgres.control install.sh LICENSE README.md ./
+COPY sql sql
+COPY src src
+COPY packaging/make-tarball.sh packaging/
+# with_llvm=no: no JIT bitcode, so the build needs no clang and matches any server's LLVM setup
+RUN make with_llvm=no && packaging/make-tarball.sh ${PG_MAJOR} /dist
+
+FROM scratch AS artifact
+COPY --from=build /dist/ /

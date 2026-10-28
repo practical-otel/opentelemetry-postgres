@@ -40,7 +40,7 @@ def tp(flags="01", trace=TRACE, parent=PARENT):
 # Fake collector
 # --------------------------------------------------------------------------
 class Sink:
-    def __init__(self):
+    def __init__(self, host="127.0.0.1"):
         self.spans = []
         self.resources = []
         self.lock = threading.Lock()
@@ -77,7 +77,7 @@ class Sink:
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
-        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = http.server.ThreadingHTTPServer((host, 0), H)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 

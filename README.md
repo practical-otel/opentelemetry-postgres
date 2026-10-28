@@ -38,33 +38,46 @@ client — no measurable difference between disabled and every-query-traced
 Python collector competing for the same cores — about 14 % lower throughput
 when *every* query is traced. Treat that as an upper bound and measure on your workload.
 
-## Quick start
+## Install
+
+On Linux, with PostgreSQL 14–17 already installed (any distribution: Debian/Ubuntu, RHEL/Rocky,
+Alpine, the official Docker images, PGDG, or your own build). **No compiler or server headers needed.**
 
 ```bash
-make && sudo make install                  # needs the server headers (postgresql-server-dev-N)
+curl -fsSL https://raw.githubusercontent.com/practical-otel/opentelemetry-postgres/main/install.sh | sh
 ```
 
-`postgresql.conf` (restart required — it allocates shared memory and starts a worker):
+`install.sh` detects your PostgreSQL major version, CPU (x86_64 / aarch64) and libc (glibc / musl),
+downloads the matching prebuilt library from the GitHub release, verifies its checksum, and copies
+three files into the server's library and extension directories. It finds them with `pg_config`, or —
+for server-only packages that don't ship it — by inspecting the install. Options:
+`--pg-config PATH`, `--pg-bin DIR`, `--version X.Y.Z`, `--from DIR|TARBALL` (offline), `--uninstall`.
+It never edits `postgresql.conf`.
+
+Then enable it and **restart** PostgreSQL (it allocates shared memory and starts a worker):
 
 ```ini
-shared_preload_libraries = 'opentelemetry_postgres'
-otel.endpoint = 'http://localhost:4318/v1/traces'   # a local OpenTelemetry Collector
+shared_preload_libraries = 'opentelemetry_postgres'   # append if you already preload others
+otel.endpoint = 'http://localhost:4318/v1/traces'      # a collector on the same host or pod
 otel.service_name = 'orders-db'
 ```
 
-Optionally `CREATE EXTENSION opentelemetry_postgres;` to get `otel_stats()`.
+Optionally `CREATE EXTENSION opentelemetry_postgres;` for `otel_stats()` (tracing does not need it).
 
-Then have your application add a sqlcommenter `traceparent` comment, e.g.
+The library is a normal PostgreSQL extension; it must match the server's major version, so there is
+one build per major. It requires glibc ≥ 2.14 or musl and nothing else. Servers built with
+`--enable-cassert` are not binary compatible. Managed services (RDS, Cloud SQL, …) don't allow custom
+extensions; use a self-managed server.
 
-```sql
-SELECT * FROM orders WHERE id = $1 /*traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'*/
+### Build from source
+
+```bash
+make && sudo make install          # needs the server headers (postgresql-server-dev-N / postgresql-devel)
 ```
 
-Most OpenTelemetry SQL instrumentations can do this for you
-(e.g. `enable_commenter=True` in the Python psycopg/SQLAlchemy instrumentations,
-`sqlcommenter` options in Java/Go/Node instrumentations).
-
 ### Docker
+
+A convenience image (the official `postgres` image plus the extension) — not required; any Postgres install works with `install.sh`.
 
 ```bash
 docker build -t opentelemetry-postgres --build-arg PG_MAJOR=17 .   # 14, 15, 16, 17
@@ -178,6 +191,12 @@ sudo make PG_CONFIG=... install
 make PG_CONFIG=... integration    # throwaway cluster + fake collector; needs uv
 docker build --target test --build-arg PG_MAJOR=16 .   # same suite, inside the official image
 ```
+
+Release artifacts are built by `packaging/Dockerfile.glibc` (on Debian 12, against PGDG headers, so the
+library needs only glibc ≥ 2.14) and `packaging/Dockerfile.musl` (Alpine). `packaging/portability.py dist`
+installs those tarballs with `install.sh` into stock PostgreSQL installs that have no build tools —
+the official Docker images, PGDG and distro packages on Debian/Ubuntu, RHEL-family PGDG and AppStream
+packages, Alpine — and checks a traced query reaches a collector with the right parent.
 
 The integration test (`test/integration.py`) starts a private cluster, a fake OTLP
 collector that decodes real protobuf with `opentelemetry-proto`, and asserts on the
