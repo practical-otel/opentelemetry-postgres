@@ -1,0 +1,31 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+  # On RDS this would be `awscloudwatch` reading /aws/rds/instance/<db>/postgresql.
+  filelog:
+    include: [/pglogs/postgresql.log]
+    start_at: beginning
+    multiline:
+      # a record starts with a timestamp; plans and multi-line queries continue it
+      line_start_pattern: '^\d{4}-\d\d-\d\d '
+
+exporters:
+  debug:
+    verbosity: basic
+  file:
+    path: /out/traces.jsonl
+    flush_interval: 1s
+  otlphttp/log-tracer:
+    logs_endpoint: http://log-tracer:4319/v1/logs
+    encoding: proto
+
+service:
+  pipelines:
+    traces:            # the app's spans AND the spans pg-log-tracer sends back
+      receivers: [otlp]
+      exporters: [debug, file]
+    logs:
+      receivers: [filelog]
+      exporters: [otlphttp/log-tracer]

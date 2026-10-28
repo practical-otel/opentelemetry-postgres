@@ -24,3 +24,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: examples/demo/run.sh
+
+  # pg-log-tracer unit tests (real captured Postgres log text -> parented spans)
+  logtrace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: logtrace/go.mod
+      - run: cd logtrace && go vet ./... && go test ./...
+
+  # Managed-database mode end to end: stock postgres image (no extension) + Collector + pg-log-tracer
+  demo-managed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: examples/demo-managed/run.sh

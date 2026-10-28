@@ -1,0 +1,24 @@
+name: opentelemetry-postgres-sideload
+# The UNMODIFIED official postgres image with the extension mounted in. No custom image,
+# no build. ./ext holds the three files from the release tarball (run.sh unpacks them).
+#
+# Paths are those of the Debian-based official images. For the -alpine images use
+#   /usr/local/lib/postgresql/  and  /usr/local/share/postgresql/extension/
+services:
+  postgres:
+    image: postgres:${PG_MAJOR:-17}
+    environment:
+      POSTGRES_PASSWORD: demo
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      OTEL_SERVICE_NAME: my-postgres
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["postgres", "-c", "shared_preload_libraries=opentelemetry_postgres"]
+    volumes:
+      - ./ext/opentelemetry_postgres.so:/usr/lib/postgresql/${PG_MAJOR:-17}/lib/opentelemetry_postgres.so:ro
+      - ./ext/opentelemetry_postgres.control:/usr/share/postgresql/${PG_MAJOR:-17}/extension/opentelemetry_postgres.control:ro
+      - ./ext/opentelemetry_postgres--0.1.0.sql:/usr/share/postgresql/${PG_MAJOR:-17}/extension/opentelemetry_postgres--0.1.0.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      retries: 30

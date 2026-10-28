@@ -1,8 +1,25 @@
 # opentelemetry-postgres
 
-A PostgreSQL extension that turns queries into OpenTelemetry spans — with **no
-changes to your queries beyond a [sqlcommenter](https://google.github.io/sqlcommenter/)
-comment** — and ships them to an OTLP collector **out of band**.
+OpenTelemetry traces for PostgreSQL queries, parented to the application's own spans through a
+[sqlcommenter](https://google.github.io/sqlcommenter/) `traceparent` comment, with **no change to
+your queries beyond that comment**. The time spent *inside* Postgres shows up in the same trace
+as the request that caused it.
+
+There are two ways to run it, producing the same spans (same names and semantic-convention attributes):
+
+| | **Extension** (`opentelemetry_postgres`) | **Log converter** (`pg-log-tracer`) |
+|---|---|---|
+| Runs | inside Postgres, as a shared library | anywhere: a static binary / container reading Postgres's logs |
+| Works on | self-managed Postgres 14–17 on Linux, incl. the stock `postgres` Docker image | **anything that produces Postgres logs: RDS, Aurora, Cloud SQL, Azure, …** |
+| Server changes | `shared_preload_libraries` + restart | logging settings (`auto_explain`, statement duration, `log_line_prefix`) |
+| Per-query cost | one memcpy; export is out of band | the cost of *your* statement logging |
+| Fidelity | every traced query: exact times, buffers, WAL, row counts, failed queries | statements the server logs: ms-resolution times, plans/buffers via `auto_explain` |
+| Latency | ~1 s | log pipeline latency (seconds; ≥ 1 min with the CloudWatch receiver's default) |
+
+Use the extension where you control the server; use the log converter where you cannot load extensions.
+Both are described below.
+
+## Mode 1: the extension
 
 ```
 ┌──────────── client ────────────┐         ┌───────────────── PostgreSQL ─────────────────┐
@@ -75,6 +92,26 @@ extensions; use a self-managed server.
 make && sudo make install          # needs the server headers (postgresql-server-dev-N / postgresql-devel)
 ```
 
+### Sideload into the stock `postgres` image (no custom image)
+
+You don't need our image or any rebuild: mount the three files into the unmodified official image and
+preload the library.
+
+```bash
+docker run -e POSTGRES_PASSWORD=pw \
+  -v $PWD/ext/opentelemetry_postgres.so:/usr/lib/postgresql/17/lib/opentelemetry_postgres.so:ro \
+  -v $PWD/ext/opentelemetry_postgres.control:/usr/share/postgresql/17/extension/opentelemetry_postgres.control:ro \
+  -v $PWD/ext/opentelemetry_postgres--0.1.0.sql:/usr/share/postgresql/17/extension/opentelemetry_postgres--0.1.0.sql:ro \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
+  postgres:17 postgres -c shared_preload_libraries=opentelemetry_postgres
+```
+
+`ext/` is the unpacked release tarball for your major version (glibc for the Debian-based images, musl
+for `-alpine`, whose directories are `/usr/local/lib/postgresql` and `/usr/local/share/postgresql/extension`).
+[`examples/sideload`](examples/sideload) is a runnable compose version (`./run.sh`, verified on
+`postgres:14` and `postgres:17`). The same files can be copied into your own image with `COPY`, or
+into a volume by an init step.
+
 ### Docker
 
 A convenience image (the official `postgres` image plus the extension) — not required; any Postgres install works with `install.sh`.
@@ -103,7 +140,7 @@ caller           parent=247bbe199b5ef730
       └─ demo-postgres SERVER SELECT orders
 ```
 
-## What you get
+## What the extension records
 
 Attributes follow the [database client span semantic conventions](https://opentelemetry.io/docs/specs/semconv/database/);
 Postgres-specific values that semconv does not define use the `postgresql.` namespace.
@@ -173,7 +210,7 @@ Shared memory used: `buffer_slots × slot_size` (8 MiB by default).
 `SELECT * FROM otel_stats();` returns `enqueued`, `dropped`, `exported`,
 `export_failures`, `export_dropped`, `queue_depth`. Alert on `dropped` and `export_failures`.
 
-## Limitations (v0.1)
+## Extension limitations (v0.1)
 
 * **Statements traced:** those run by the executor — `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`. Utility statements (DDL, `COPY`, `CALL`, `VACUUM`) are not traced yet.
 * **Errors:** failures during execution are traced; parse, analyse and plan-time errors (syntax errors, missing tables, constant-folded `1/0`) are not.
@@ -183,6 +220,89 @@ Shared memory used: `buffer_slots × slot_size` (8 MiB by default).
 * **Export:** OTLP/HTTP protobuf over plain `http://` to a nearby collector (no TLS, no gzip, no retry — a failed batch is dropped and counted). `getaddrinfo` is not time-bounded; prefer an IP or a local name.
 * **Postgres versions:** 14, 15, 16 and 17 (the end-to-end suite passes on each in the official Docker images). 18 is not supported yet (the `ExecutorStart` hook changed).
 
+## Mode 2: managed databases (RDS, Cloud SQL, Azure, …) with `pg-log-tracer`
+
+Managed services won't load custom C extensions, but they do let you configure Postgres's own
+logging, and a logged statement still contains the sqlcommenter comment. `pg-log-tracer`
+(`logtrace/`, Go, one static binary, also a container) turns those log lines into the same parented spans.
+
+```
+ app ──SQL + /*traceparent*/──► Postgres ──logs──► log pipeline ──► pg-log-tracer ──OTLP traces──► Collector
+                              (auto_explain,      (file, CloudWatch,    parse, merge plan +
+                               statement duration) Cloud Logging, …)    duration, redact
+```
+
+**1. Configure Postgres logging** (in the parameter group / flags of your provider):
+
+```ini
+log_min_duration_statement = 0            # or a threshold, e.g. 100ms; spans exist only for logged statements
+log_line_prefix = '%m [%p] %q%u@%d %e '   # must contain %p and %m (or %t); %e adds the SQLSTATE to error spans
+log_timezone = 'UTC'                      # other zone abbreviations are ambiguous
+# optional, for plans, row counts and buffers:
+shared_preload_libraries = 'auto_explain'
+auto_explain.log_min_duration = 0
+auto_explain.log_analyze = on
+auto_explain.log_buffers = on
+auto_explain.log_timing = off
+```
+
+`log_min_duration_statement = 0` logs every statement, which can be a lot of log volume; use a threshold or
+statement sampling (`log_min_duration_sample`, `log_statement_sample_rate`) as appropriate. Postgres's own log
+contains full query text and literals regardless of what the tracer exports, so enabling statement logging is
+a decision about your logs first.
+
+**2. Run the converter**, with any of these inputs:
+
+```bash
+pg-log-tracer --file /var/log/postgresql/postgresql.log --log-line-prefix '%m [%p] %q%u@%d %e '   # follow a file
+some-log-source | pg-log-tracer --log-line-prefix '...'                                              # stdin
+pg-log-tracer --listen :4319 --log-line-prefix '...'   # receive OTLP logs (POST /v1/logs) from a Collector
+```
+
+Traces go to `OTEL_EXPORTER_OTLP_ENDPOINT` (or `--endpoint`). Other flags: `--service-name`,
+`--query-text off|sanitized|full`, `--include-plans`, `--trace-untraced`, `--min-duration`. Binaries for
+Linux/macOS/Windows (amd64/arm64) and a container image are built by the release workflow;
+`cd logtrace && go build` works too. It logs counters every minute and on exit
+(`lines=… records=… statements=… spans=…`) and warns if no line matches `--log-line-prefix`.
+
+The OTLP-logs input is the integration point for cloud log sources: the Collector's receivers
+(`filelog`, `awscloudwatch`, `googlecloudpubsub`, `azureeventhub`, …) read the provider's logs and an
+`otlphttp` exporter forwards them to `--listen`. The demo `examples/demo-managed` does exactly this with
+`filelog`; swap the receiver for your cloud:
+
+```yaml
+receivers:
+  awscloudwatch:                # alpha; polls every logs.poll_interval (default 1m)
+    region: eu-west-1
+    logs:
+      poll_interval: 10s
+      groups:
+        named:
+          /aws/rds/instance/my-db/postgresql: {}
+exporters:
+  otlphttp/log-tracer:
+    logs_endpoint: http://pg-log-tracer:4319/v1/logs
+    encoding: proto
+service:
+  pipelines:
+    logs: { receivers: [awscloudwatch], exporters: [otlphttp/log-tracer] }
+```
+
+**What you get compared with the extension.** Same span names and `db.*` attributes, plus
+`postgresql.span.source = log`. Extra: utility statements (DDL, `COPY`, …) and parse/plan-time errors are traced,
+because Postgres logs them. Less: no WAL counters or affected-row counts; row counts and buffers only come from an
+`auto_explain` plan; timestamps have the log's millisecond precision and the end time is the log time (start = end − duration),
+so they rely on the database and application clocks agreeing; failed statements have no duration (zero-length span).
+The same sqlcommenter caveats apply (prepared statements keep the traceparent from the `Parse`; bound parameters
+and `DETAIL`/`CONTEXT` lines are never exported). The collection name is inferred from the plan or, failing that,
+a conservative reading of the SQL, and left out when unclear.
+
+**Status.** Verified against real Postgres 17 logs: unit tests on captured log text, and `examples/demo-managed`
+(stock `postgres` image with no extension → logs → Collector `filelog` → `pg-log-tracer` → traces parented to the
+app's psycopg2 spans). **Not yet tested against actual RDS, Cloud SQL or Azure, or the cloud log receivers**
+(CloudWatch event splitting of multi-line plans in particular); the parser accepts both one event per line
+and one event per record.
+
 ## Development
 
 ```bash
@@ -190,6 +310,9 @@ make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 sudo make PG_CONFIG=... install
 make PG_CONFIG=... integration    # throwaway cluster + fake collector; needs uv
 docker build --target test --build-arg PG_MAJOR=16 .   # same suite, inside the official image
+(cd logtrace && go test ./...)    # pg-log-tracer unit tests
+examples/demo/run.sh              # extension  -> Collector, parentage verified
+examples/demo-managed/run.sh      # stock postgres + logs -> pg-log-tracer -> Collector, parentage verified
 ```
 
 Release artifacts are built by `packaging/Dockerfile.glibc` (on Debian 12, against PGDG headers, so the
@@ -205,7 +328,8 @@ ring overflow.
 
 ## Roadmap
 
-* Utility statements and `COPY`
+* Extension: utility statements and `COPY`
+* `pg-log-tracer`: native CloudWatch / Cloud Logging / Azure inputs without a Collector, JSON (`jsonlog`) input, tests against real managed services
 * Parent/child spans for nested statements and per-plan-node spans from `analyze` plans
 * Metrics (`db.client.operation.duration` server-side, ring/exporter health)
 * Retry with backoff, TLS and gzip, or a Unix-socket/sidecar transport

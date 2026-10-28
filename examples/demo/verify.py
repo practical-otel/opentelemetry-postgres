@@ -21,8 +21,11 @@ import urllib.error
 import urllib.request
 
 APP = os.environ.get("APP_URL", "http://localhost:8080")
-FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "traces.jsonl")
+FILE = os.environ.get("TRACES_FILE", os.path.join(os.getcwd(), "out", "traces.jsonl"))  # run from the demo directory
 SERVER, CLIENT = 2, 3
+# MODE=extension (default): spans from the in-process extension.
+# MODE=log: spans rebuilt from PostgreSQL's logs by pg-log-tracer (no extension on the server).
+MODE = os.environ.get("MODE", "extension")
 
 
 def call(method, path, trace, parent, body=None):
@@ -119,6 +122,7 @@ def main():
     assert a["db.query.text"] == "SELECT id, customer, total FROM orders WHERE id = ?", a["db.query.text"]
     assert int(a["db.response.returned_rows"]) == 1
     assert "Scan using orders_pkey on orders" in a["postgresql.query.plan"], a.get("postgresql.query.plan")
+    assert a["postgresql.span.source"] == "log" if MODE == "log" else "postgresql.span.source" not in a
     results.append(("GET /orders/1", t, p, spans))
 
     # 2. INSERT (customer email must never reach the telemetry)
@@ -128,9 +132,10 @@ def main():
     _, _, pg = check_chain(spans, p)
     a = pg["attrs"]
     assert a["db.operation.name"] == "INSERT" and a["db.collection.name"] == "orders"
-    assert int(a["postgresql.rows.affected"]) == 1
     assert "carol@example.com" not in json.dumps(pg), "literal leaked into the postgres span"
-    assert int(a["postgresql.wal.records"]) > 0
+    if MODE == "extension":  # counters the log does not carry
+        assert int(a["postgresql.rows.affected"]) == 1
+        assert int(a["postgresql.wal.records"]) > 0
     results.append(("POST /orders", t, p, spans))
 
     # 3. runtime SQL error
