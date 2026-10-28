@@ -1,0 +1,4 @@
+comment = 'OpenTelemetry tracing for PostgreSQL queries (sqlcommenter parentage, out-of-band export)'
+default_version = '0.1.0'
+module_pathname = '$libdir/opentelemetry_postgres'
+relocatable = true
