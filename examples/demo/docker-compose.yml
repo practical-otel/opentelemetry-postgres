@@ -1,0 +1,56 @@
+name: opentelemetry-postgres-demo
+# Flask app -> PostgreSQL (with opentelemetry-postgres) -> OpenTelemetry Collector.
+#   ./run.sh      builds, starts, sends traffic, and verifies the traces are parented
+services:
+  postgres:
+    build:
+      context: ../..
+      args:
+        PG_MAJOR: ${PG_MAJOR:-17}
+    environment:
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: shop
+      # The extension reads the standard OTel environment variables.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
+      OTEL_SERVICE_NAME: demo-postgres
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=opentelemetry_postgres
+      - -c
+      - otel.flush_interval=500ms
+      - -c
+      - otel.plan_mode=estimate
+      - -c
+      - otel.plan_min_duration=0
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shop"]
+      interval: 2s
+      retries: 30
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol/config.yaml"]
+    user: "0:0"   # demo only: lets the file exporter write to the bind mount
+    volumes:
+      - ./collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./out:/out
+    ports:
+      - "4318:4318"
+
+  app:
+    build: ./app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      collector:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://postgres:demo@postgres:5432/shop
+      OTEL_SERVICE_NAME: demo-app
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
+      OTEL_BSP_SCHEDULE_DELAY: "500"
+    ports:
+      - "8080:8080"

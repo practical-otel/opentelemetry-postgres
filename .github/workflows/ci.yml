@@ -5,6 +5,8 @@ on:
   pull_request:
 
 jobs:
+  # Builds the extension against each PostgreSQL major in the official image and
+  # runs the end-to-end suite (test/integration.py) inside it.
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -13,17 +15,12 @@ jobs:
         pg: [14, 15, 16, 17]
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - name: Install PostgreSQL ${{ matrix.pg }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
-          sudo systemctl stop postgresql || true
-      - name: Build
-        run: make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
-      - name: Install
-        run: sudo make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config install
-      - name: Integration tests
-        run: make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config integration
+      - run: docker build --target test --build-arg PG_MAJOR=${{ matrix.pg }} .
+
+  # Real Collector + Flask app using the OpenTelemetry SQL commenter; asserts that
+  # PostgreSQL spans are children of the application's client spans.
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: examples/demo/run.sh

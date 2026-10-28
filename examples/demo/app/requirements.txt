@@ -1,0 +1,6 @@
+flask
+psycopg2-binary
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-instrumentation-flask
+opentelemetry-instrumentation-psycopg2

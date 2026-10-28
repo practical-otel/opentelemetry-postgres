@@ -64,6 +64,32 @@ Most OpenTelemetry SQL instrumentations can do this for you
 (e.g. `enable_commenter=True` in the Python psycopg/SQLAlchemy instrumentations,
 `sqlcommenter` options in Java/Go/Node instrumentations).
 
+### Docker
+
+```bash
+docker build -t opentelemetry-postgres --build-arg PG_MAJOR=17 .   # 14, 15, 16, 17
+docker run -e POSTGRES_PASSWORD=pw -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 opentelemetry-postgres
+```
+
+The image is the official `postgres` image plus the extension, with
+`shared_preload_libraries` already set. `OTEL_EXPORTER_OTLP_ENDPOINT` and
+`OTEL_SERVICE_NAME` are honoured.
+
+### Try it end to end
+
+[`examples/demo`](examples/demo) runs a Flask app (OpenTelemetry Flask + psycopg2
+instrumentation with `enable_commenter`), PostgreSQL with this extension, and a real
+OpenTelemetry Collector. `examples/demo/run.sh` sends requests carrying a `traceparent`
+and checks that every Postgres span is a child of the app's database client span:
+
+```
+GET /orders/1   trace=bc5054be1feec40310b3e51943ab0461
+caller           parent=247bbe199b5ef730
+  └─ demo-app      SERVER GET /orders/<int:order_id>
+    └─ demo-app      CLIENT SELECT
+      └─ demo-postgres SERVER SELECT orders
+```
+
 ## What you get
 
 Attributes follow the [database client span semantic conventions](https://opentelemetry.io/docs/specs/semconv/database/);
@@ -142,7 +168,7 @@ Shared memory used: `buffer_slots × slot_size` (8 MiB by default).
 * **Nested statements** (inside functions / triggers) are not linked as children of the outer span. They are only traced if they carry their own traceparent, or if `otel.trace_untraced = on`.
 * **Duration** is executor start → end. For a cursor that is fetched slowly, that includes idle time between fetches.
 * **Export:** OTLP/HTTP protobuf over plain `http://` to a nearby collector (no TLS, no gzip, no retry — a failed batch is dropped and counted). `getaddrinfo` is not time-bounded; prefer an IP or a local name.
-* **Postgres versions:** developed and tested against 15; builds are checked against 14, 16 and 17 headers and run in CI. 18 is not supported yet (the `ExecutorStart` hook changed).
+* **Postgres versions:** 14, 15, 16 and 17 (the end-to-end suite passes on each in the official Docker images). 18 is not supported yet (the `ExecutorStart` hook changed).
 
 ## Development
 
@@ -150,6 +176,7 @@ Shared memory used: `buffer_slots × slot_size` (8 MiB by default).
 make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 sudo make PG_CONFIG=... install
 make PG_CONFIG=... integration    # throwaway cluster + fake collector; needs uv
+docker build --target test --build-arg PG_MAJOR=16 .   # same suite, inside the official image
 ```
 
 The integration test (`test/integration.py`) starts a private cluster, a fake OTLP

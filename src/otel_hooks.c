@@ -14,9 +14,9 @@
 
 #include "access/parallel.h"
 #include "commands/explain.h"
+#include "commands/dbcommands.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
-#include "libpq/libpq-be.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/plannodes.h"
@@ -52,6 +52,9 @@ typedef struct OtelQueryState
 } OtelQueryState;
 
 static OtelQueryState inflight[OTEL_MAX_INFLIGHT];
+
+/* Database name, looked up once per backend (a backend never changes database). */
+static char backend_dbname[NAMEDATALEN];
 
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
@@ -369,7 +372,7 @@ emit_span(OtelQueryState *st, QueryDesc *qd, const char *sqlstate, const char *e
 	sp->wal_records = wu.wal_records - st->wal0.wal_records;
 	sp->wal_bytes = wu.wal_bytes - st->wal0.wal_bytes;
 
-	strlcpy(sp->dbname, MyProcPort->database_name ? MyProcPort->database_name : "", NAMEDATALEN);
+	strlcpy(sp->dbname, backend_dbname, NAMEDATALEN);
 	strlcpy(sp->collection, st->collection, NAMEDATALEN);
 
 	otel_queue_publish(slot, pos);
@@ -422,6 +425,17 @@ otel_ExecutorStart(QueryDesc *queryDesc, int eflags)
 
 			if (st->in_use)
 				continue;
+
+			if (backend_dbname[0] == '\0')
+			{
+				char	   *dbname = get_database_name(MyDatabaseId);
+
+				if (dbname)
+				{
+					strlcpy(backend_dbname, dbname, NAMEDATALEN);
+					pfree(dbname);
+				}
+			}
 
 			*st = local;
 			st->qd = queryDesc;
